@@ -5,10 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tetris</title>
   <link rel="stylesheet" href="style.css" />
+  <script>(function(){var t=localStorage.getItem('tetris-theme');if(t==='light')document.documentElement.setAttribute('data-theme','light');}());</script>
 </head>
 <body>
   <div class="wrapper">
-    <h1 class="game-title">TETRIS</h1>
+    <div class="title-row">
+      <h1 class="game-title">TETRIS</h1>
+      <button id="theme-toggle" class="theme-toggle" aria-label="Cambiar tema">LIGHT</button>
+    </div>
     <div class="game-container">
       <canvas id="board" width="300" height="600"></canvas>
 
