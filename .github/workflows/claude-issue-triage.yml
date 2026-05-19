@@ -1,0 +1,152 @@
+name: Claude Issue Triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+# Un solo análisis por issue a la vez; si llega una edición mientras corre uno,
+# cancela el anterior y arranca con el contenido más reciente.
+concurrency:
+  group: issue-triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      issues: write   # necesario para asignar/crear labels y publicar comentarios
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Comprobación de seguridad: si el issue menciona @claude lo gestiona
+      # claude.yml; aquí usamos el patrón env: + $VAR para evitar inyección.
+      - name: Prepare triage context
+        id: ctx
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          # Ceder el control a claude.yml si el issue menciona @claude
+          if echo "$ISSUE_TITLE" | grep -qF '@claude' || \
+             echo "$ISSUE_BODY"  | grep -qF '@claude'; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+          # Exportar valores seguros para el siguiente paso
+          printf 'TRIAGE_ISSUE_NUMBER=%s\n' "$ISSUE_NUMBER" >> "$GITHUB_ENV"
+          printf 'TRIAGE_REPO=%s\n'         "$REPOSITORY"   >> "$GITHUB_ENV"
+
+      - name: Analyze issue with Claude
+        if: steps.ctx.outputs.should_run == 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Solo las operaciones gh estrictamente necesarias + lectura del repo
+          claude_args: >-
+            --allowed-tools
+            "Read,Glob,Grep,Bash(gh issue view*),Bash(gh issue edit*),Bash(gh issue comment*),Bash(gh label list*),Bash(gh label create*)"
+
+          prompt: |
+            Eres el asistente de triage de este repositorio Tetris.
+            Se ha abierto o editado el issue #${{ env.TRIAGE_ISSUE_NUMBER }}
+            en ${{ env.TRIAGE_REPO }}.
+
+            ## Tu tarea — sigue estos pasos EN ORDEN
+
+            ### 1. Leer el issue
+            ```
+            gh issue view ${{ env.TRIAGE_ISSUE_NUMBER }} --repo ${{ env.TRIAGE_REPO }}
+            ```
+
+            ### 2. Leer el código relevante del repositorio
+            Lee estos archivos para entender el contexto técnico antes de
+            diagnosticar:
+            - `CLAUDE.md` — arquitectura del proyecto e invariantes críticos
+            - `game.js`   — lógica principal del juego (~300 líneas)
+            - `index.html`— canvas y estructura HTML
+            - `style.css` — solo si el issue menciona estilos o UI
+
+            ### 3. Gestionar labels
+
+            **a)** Lista las labels existentes:
+            ```
+            gh label list --repo ${{ env.TRIAGE_REPO }}
+            ```
+
+            **b)** Conjunto base de labels y sus colores hex:
+            | Label              | Color   |
+            |--------------------|---------|
+            | bug                | #d73a4a |
+            | enhancement        | #a2eeef |
+            | documentation      | #0075ca |
+            | question           | #d876e3 |
+            | good first issue   | #7057ff |
+            | priority:high      | #e11d48 |
+            | priority:medium    | #f97316 |
+            | priority:low       | #84cc16 |
+
+            **c)** Por cada label que vayas a asignar y que **no exista aún**,
+            créala primero:
+            ```
+            gh label create "<nombre>" --color "<hex>" \
+              --description "<desc breve>" \
+              --repo ${{ env.TRIAGE_REPO }}
+            ```
+
+            **d)** Asigna las labels que apliquen:
+            ```
+            gh issue edit ${{ env.TRIAGE_ISSUE_NUMBER }} \
+              --add-label "<label1>,<label2>" \
+              --repo ${{ env.TRIAGE_REPO }}
+            ```
+
+            ### 4. Publicar comentario de análisis
+
+            Publica un comentario **en español** con esta estructura exacta
+            (Markdown). Usa `gh issue comment`:
+
+            ```markdown
+            ## 🤖 Análisis automático de Claude
+
+            ### Resumen del problema
+            <1-2 frases explicando qué reporta o pide el issue>
+
+            ### Clasificación
+            - **Tipo:** <bug | mejora | documentación | pregunta | otro>
+            - **Prioridad estimada:** <alta | media | baja>
+            - **Justificación:** <por qué esa prioridad>
+
+            ### Análisis técnico
+            - **Archivos / funciones implicadas:**
+              <lista con rutas y nombres de función relevantes, p. ej.
+               `game.js: collide()`, `lockPiece()`, `index.html: <canvas>`>
+            - **Causa probable:** <diagnóstico técnico conciso>
+
+            > ⚠️ Invariante crítico (CLAUDE.md): `COLS·BLOCK` y `ROWS·BLOCK`
+            > deben coincidir con el `width`/`height` del `<canvas id="board">`.
+            > Cualquier cambio en `COLS`, `ROWS` o `BLOCK` requiere actualizar
+            > también `index.html`.
+
+            ### Plan de implementación
+            1. <paso 1 concreto>
+            2. <paso 2 concreto>
+            …
+
+            ### Riesgos y dudas abiertas
+            - <riesgo, efecto secundario o pregunta al autor si falta información>
+            ```
+
+            **Caso especial:** si el issue es spam, está vacío o no tiene
+            información reproducible, asigna únicamente la label `question`,
+            omite el plan y pide al autor los datos necesarios en el comentario.
